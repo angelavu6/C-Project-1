@@ -1,4 +1,4 @@
-# JAVA Project 1 - ML to C Code Translator
+# C Project 1 - ML to C Code Translator
 
 ## Project Overview
 
