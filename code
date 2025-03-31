@@ -1,0 +1,279 @@
+// Platform: Linux
+
+#include <stdio.h>  // Standard I/O library for file and console operations
+#include <string.h> // String handling functions like strcpy, strchr etc.
+#include <stdlib.h> // General utilities, including memory allocation and system functions
+#include <unistd.h> // POSIX operating system API, including getpid()
+
+#define MAX_IDENTIFIER_LENGTH 13  // Maximum length for variable names and function identifiers
+#define MAX_LINE_LENGTH 200      // Maximum length for lines read from input files
+#define MAX_VARS 50              // Maximum number of variables that can be tracked
+
+int declared_vars_count = 0;    // Counter to track the number of declared variables
+char declared_vars[MAX_VARS][MAX_IDENTIFIER_LENGTH]; // Array to store names of declared variables
+
+// Function prototypes
+void error_report(const char *message); // Function to report errors
+void print_usage(void);                // Function to print usage information
+int process_file(const char *filename, FILE *content_file); // Function to process ML file and generate C code
+void handle_function(const char *line, FILE *content_file);  // Function to handle function definitions
+void function_body(char *line, FILE *content_file);          // Function to handle function body statements
+int line_not_indented(const char *line);  // Function to check if a line is not indented
+void declare_variable_if_necessary(const char *identifier, FILE *content_file); // Function to declare variables if not already declared
+int is_declared(const char *identifier);  // Function to check if a variable has already been declared
+
+// Function to format and print values based on their type (integer or floating-point)
+void print_formatted(double value) {
+    if ((int)value == value) {         // Check if the value is an integer
+        printf("%d\n", (int)value);   // Print as integer
+    } else {
+        printf("%.6f\n", value);      // Otherwise, print as floating-point with six decimal places
+    }
+}
+
+// Function to report errors by printing error messages to stderr
+void error_report(const char *message) {
+    fprintf(stderr, "%s\n", message); // Print error message to stderr
+}
+
+// Function to print usage information for the command-line arguments
+void print_usage(void) {
+    fprintf(stderr, "Usage: runml <program.ml> [optional_args...]\n");
+    fprintf(stderr, "    <program.ml>    Path to the ML file to process\n");
+    fprintf(stderr, "    [optional_args...]  Optional real-number arguments to pass to the compiled program\n");
+}
+
+// Function to process the ML file and generate corresponding C code
+int process_file(const char *filename, FILE *content_file) {
+    FILE *file = fopen(filename, "r");  // Open the ML file for reading
+    if (file == NULL) {                // Check if file opening was successful
+        error_report("! Error: There is a problem opening the file!"); // Report error if file cannot be opened
+        return 1;                      // Return non-zero to indicate failure
+    }
+
+    // Format the generated file
+    // Add necessary includes and the print_formatted function
+    fprintf(content_file, "#include <stdio.h>\n#include <math.h>\n\n"); // Add includes for C code
+    fprintf(content_file, "void print_formatted(double value) {\n");  // Define the print_formatted function
+    fprintf(content_file, "    if ((int)value == value) {\n");        // Check if value is an integer
+    fprintf(content_file, "        printf(\"%%d\\n\", (int)value);\n"); // Print integer value
+    fprintf(content_file, "    } else {\n");                         // Otherwise
+    fprintf(content_file, "        printf(\"%%.6f\\n\", value);\n"); // Print floating-point value
+    fprintf(content_file, "    }\n");
+    fprintf(content_file, "}\n\n");
+
+    fprintf(content_file, "int main(int argc, char *argv[]) {\n"); // Start the main function
+
+    char line[MAX_LINE_LENGTH];  // Buffer to hold each line of the input file
+    int inside_function = 0;    // Flag indicating whether we are inside a function
+
+    while (fgets(line, sizeof(line), file)) {  // Read each line from the input file
+        char *comment = strchr(line, '#');    // Find the start of a comment
+        if (comment) *comment = '\0';        // Remove the comment by terminating the string
+        if (strlen(line) == 0 || strcmp(line, "\n") == 0) continue; // Skip the empty lines
+
+        // Check if the line indicates the start of a function definition
+        if (strstr(line, "function")) { 
+            if (inside_function) { // If already inside a function
+                fprintf(content_file, "}\n"); // Close the previous function
+            }
+            handle_function(line, content_file); // Handle the new function definition
+            inside_function = 1; // Set the flag to indicate we are inside a function
+        } else if (line_not_indented(line)) { // Check if the line is not indented (i.e., if outside a function)
+            if (inside_function) {
+                fprintf(content_file, "}\n"); // Close the previous function
+                inside_function = 0; // Reset the flag
+            }
+            function_body(line, content_file); // Process function body statements
+        } else {
+            function_body(line, content_file); // Process indented lines (function body)
+        }
+    }
+
+    if (inside_function) {  // If still inside a function at the end of the file
+        fprintf(content_file, "}\n"); // Close the last function
+    }
+
+    fprintf(content_file, "    return 0;\n}\n"); // End of main function
+
+    fclose(file); // Close the input file
+
+    return 0; // Return 0 to indicate success
+}
+
+// Function to handle function definitions in the ML file and write them to the C code
+void handle_function(const char *line, FILE *content_file) {
+    char function_name[MAX_IDENTIFIER_LENGTH];
+    char parameters[MAX_LINE_LENGTH];
+
+    // Parse the function definition line
+    if (sscanf(line, "function %12s %99[^\n]", function_name, parameters) != 2) {
+        fprintf(stderr, "! Error: Invalid function definition: %s\n", line); // Report error if parsing fails
+        return;
+    }
+
+    // Print function header in the generated C code
+    fprintf(content_file, "double %s(", function_name);
+
+    // Handle function parameters
+    char *param = strtok(parameters, " ,"); // Tokenize the parameters
+    while (param != NULL) { // While there are more parameters
+        fprintf(content_file, "double %s", param); // Print parameter
+        param = strtok(NULL, " ,"); // Get the next parameter
+        if (param != NULL) {
+            fprintf(content_file, ", "); // Add comma between parameters
+        }
+    }
+
+    fprintf(content_file, ") {\n"); // End of function header
+}
+
+// Function to process statements inside the body of a function
+void function_body(char *line, FILE *content_file) {
+    char identifier[MAX_IDENTIFIER_LENGTH];
+    char expression[MAX_LINE_LENGTH];
+
+    // Remove leading tabs or spaces
+    char trim_the_line[MAX_LINE_LENGTH];
+    sscanf(line, "%[^\n]", trim_the_line); // Remove newline character
+    char *start = trim_the_line;
+    while (*start == '\t') start++; // Remove leading tabs
+
+    // Handle different types of statements in the function body
+    if (strncmp(start, "return ", 7) == 0) { // Check if the statement is a return statement
+        sscanf(start + 7, "%100[^\n]", expression); // Get the return expression
+        fprintf(content_file, "    return %s;\n", expression); // Print return statement
+    }
+    else if (sscanf(start, "%12s <- %100[^\n]", identifier, expression) == 2) { // Handle variable assignment
+        declare_variable_if_necessary(identifier, content_file); // Declare variable if not already declared
+        fprintf(content_file, "    %s = %s;\n", identifier, expression); // Print assignment statement
+    }
+    else if (strncmp(start, "print ", 6) == 0) { // Handle print statements
+        sscanf(start + 6, "%100[^\n]", expression); // Get the expression to print
+        fprintf(content_file, "    print_formatted(%s);\n", expression); // Print the formatted output
+    }
+    else if (sscanf(start, "%12s(%100[^\n])", identifier, expression) == 2) { // Handle function calls
+        fprintf(content_file, "    %s(%s);\n", identifier, expression); // Print function call
+    }
+    else if (sscanf(start, "%12s %*[ (]%100[^\n]", identifier, expression) == 2) { // Handle function calls with spaces and commas in arguments
+        size_t len = strlen(expression); // Get the length of the expression
+        if (len > 0 && expression[len-1] == ')'){ // If there is an extra closing parenthesis
+            expression[len-1] = '\0'; // Remove the extra parenthesis
+        }
+        fprintf(content_file, "    %s(%s);\n", identifier, expression); // Print function call
+    }
+    else { // Handle unrecognized statements
+        fprintf(stderr, "! Error: Unknown statement in the function: %s\n", line); // Report error if fails all above conditions
+    }
+}
+
+// Function to check if a line is not indented
+int line_not_indented(const char *line) {
+    return line[0] != '\t'; // Return 1 if the line does not start with a tab (not indented), otherwise return 0
+}
+
+// Function to declare a variable if it is not already declared
+void declare_variable_if_necessary(const char *identifier, FILE *content_file) {
+    if (!is_declared(identifier)) { // If the variable has not been declared
+        fprintf(content_file, "    double %s = 0.0;\n", identifier); // Declare it as a double with initial value 0.0
+        strcpy(declared_vars[declared_vars_count++], identifier); // Store the variable name
+    }
+}
+
+// Function to check if a variable has already been declared
+int is_declared(const char *identifier) {
+    for (int i = 0; i < declared_vars_count; i++) { // Check if the variable has already been declared
+        if (strcmp(declared_vars[i], identifier) == 0) {
+            return 1; // Variable is already declared
+        }
+    }
+    return 0; // Variable is not declared
+}
+
+// Function to check if a file exists
+// Returns 1 if the file exists, 0 otherwise
+int does_file_exists(const char *filename) {
+    return access(filename, F_OK) == 0; // Check if the file exists using access() with F_OK flag
+}
+
+// Function to delete a file if it exists
+// Attempts to delete the specified file. If deletion fails, reports an error
+void try_delete_file(const char *filename) {
+    // Check if the file exists before attempting to delete it
+    if (does_file_exists(filename)) {
+        // Attempt to delete the file
+        if (remove(filename) != 0) {
+            // If the file could not be deleted, print an error message to stderr
+            fprintf(stderr, "! Error: Unable to delete file: %s\n", filename);
+        }
+    }
+}
+
+
+// Function to clean up files
+void cleanup_files(const char *compiled_filename, const char *executable_filename) {
+    try_delete_file(compiled_filename); // Attempt to delete the compiled C file
+    try_delete_file(executable_filename); // Attempt to delete the executable file
+}
+
+// Main function
+int main(int argc, char *argv[]) {
+    if (argc < 2) { // Check if there are enough command-line arguments
+        print_usage(); // Print usage message if not enough arguments
+        return 1;
+    }
+
+    // Construct filenames using the process ID
+    int pid = getpid();
+    char compiled_filename[30];
+    snprintf(compiled_filename, sizeof(compiled_filename), "ml-%d.c", pid); // Filename for the generated C code
+    char executable_filename[30];
+    snprintf(executable_filename, sizeof(executable_filename), "ml-%d", pid); // Filename for the executable
+
+    FILE *content_file = NULL; // Initialize file pointer to NULL
+
+    // Generate the C code file
+    content_file = fopen(compiled_filename, "w");
+    if (!content_file) {
+        error_report("! Error: Cannot create output file"); // Report error if file cannot be created
+        cleanup_files(compiled_filename, executable_filename); // Clean up any existing files
+        return 1;
+    }
+
+    // Process the ML file and generate the corresponding C code
+    int result = process_file(argv[1], content_file);
+    fclose(content_file); // Close the C code file
+
+    if (result != 0) { // If processing failed
+        cleanup_files(compiled_filename, executable_filename); // Clean up generated file
+        return 1;
+    }
+
+    // Compile the generated C program
+    char compiling_command[256];
+    snprintf(compiling_command, sizeof(compiling_command), "gcc -std=c11 -o %s %s", executable_filename, compiled_filename); // Compile command
+    int compile_result = system(compiling_command); // Execute the compile command
+
+    if (compile_result != 0) { // Check if compilation was successful
+        error_report("! Error: Compilation failed"); // Report error if compilation failed
+        cleanup_files(compiled_filename, executable_filename); // Clean up files
+        return 1;
+    }
+
+    // Execute the compiled program with any optional arguments
+    char execution_command[256];
+    snprintf(execution_command, sizeof(execution_command), "./%s", executable_filename); // Execution command
+    int exec_result = system(execution_command); // Execute the compiled program
+    if (exec_result != 0) { // Check if execution was successful
+        error_report("! Error: Execution failed"); // Report error if execution failed
+        cleanup_files(compiled_filename, executable_filename); // Clean up files
+        return 1;
+    }
+
+    // Clean up generated files
+    cleanup_files(compiled_filename, executable_filename);
+
+    return 0; // Indicate successful completion
+}
+
+
